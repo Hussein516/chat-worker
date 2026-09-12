@@ -19,24 +19,55 @@ export class ChatRoom extends DurableObject {
     return new Response("Chat room is active", { status: 200 });
   }
 
+  broadcast(payload, excludeWs) {
+    this.sessions = this.sessions.filter((ws) => {
+      if (ws === excludeWs) return true;
+      try {
+        ws.send(payload);
+        return true;
+      } catch (err) {
+        return false;
+      }
+    });
+  }
+
   handleSession(webSocket, ip) {
     webSocket.accept();
     this.sessions.push(webSocket);
 
     webSocket.addEventListener("message", async (event) => {
-      // ====== فحص Rate Limit: 20 رسالة كل 10 ثواني لكل IP ======
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (e) {
+        return;
+      }
+
+      if (data.type === "typing") {
+        const payload = JSON.stringify({
+          type: "typing",
+          username: data.username || "",
+          typing: !!data.typing,
+        });
+        this.broadcast(payload, webSocket);
+        return;
+      }
+
+      if (data.type === "seen") {
+        const payload = JSON.stringify({
+          type: "seen",
+          messageId: data.messageId || "",
+          username: data.username || "",
+        });
+        this.broadcast(payload, webSocket);
+        return;
+      }
+
       const { success } = await this.env.RATE_LIMITER.limit({ key: ip });
       if (!success) {
         try {
           webSocket.send(JSON.stringify({ error: "rate_limited" }));
         } catch (e) {}
-        return;
-      }
-
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch (e) {
         return;
       }
 
@@ -51,14 +82,7 @@ export class ChatRoom extends DurableObject {
       if (this.messages.length > 20) this.messages.shift();
 
       const payload = JSON.stringify(msg);
-      this.sessions = this.sessions.filter((ws) => {
-        try {
-          ws.send(payload);
-          return true;
-        } catch (err) {
-          return false;
-        }
-      });
+      this.broadcast(payload, null);
     });
 
     webSocket.addEventListener("close", () => {
