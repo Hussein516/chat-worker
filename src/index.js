@@ -11,18 +11,28 @@ export class ChatRoom extends DurableObject {
     if (request.headers.get("Upgrade") === "websocket") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
-      this.handleSession(server);
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      this.handleSession(server, ip);
       return new Response(null, { status: 101, webSocket: client });
     }
 
     return new Response("Chat room is active", { status: 200 });
   }
 
-  handleSession(webSocket) {
+  handleSession(webSocket, ip) {
     webSocket.accept();
     this.sessions.push(webSocket);
 
-    webSocket.addEventListener("message", (event) => {
+    webSocket.addEventListener("message", async (event) => {
+      // ====== فحص Rate Limit: 20 رسالة كل 10 ثواني لكل IP ======
+      const { success } = await this.env.RATE_LIMITER.limit({ key: ip });
+      if (!success) {
+        try {
+          webSocket.send(JSON.stringify({ error: "rate_limited" }));
+        } catch (e) {}
+        return;
+      }
+
       let data;
       try {
         data = JSON.parse(event.data);
