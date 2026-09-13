@@ -69,7 +69,7 @@ export class ChatRoom extends DurableObject {
       if (data.username) {
         this.socketUsernames.set(webSocket, data.username);
 
-        if (this.bannedUsers.has(data.username)) {
+        if (this.bannedUsers.has(data.username.toLowerCase())) {
           try {
             webSocket.send(JSON.stringify({ error: "banned" }));
           } catch (e) {}
@@ -83,11 +83,14 @@ export class ChatRoom extends DurableObject {
         const target = data.target;
         if (!target) return;
 
-        this.bannedUsers.add(target);
+        const targetLower = target.toLowerCase();
+        this.bannedUsers.add(targetLower);
         await this.saveBanned();
 
+        let foundActive = false;
         for (const [ws, uname] of this.socketUsernames.entries()) {
-          if (uname === target) {
+          if (uname.toLowerCase() === targetLower) {
+            foundActive = true;
             try {
               ws.send(JSON.stringify({ error: "kicked", reason: data.reason || "" }));
               ws.close();
@@ -95,19 +98,30 @@ export class ChatRoom extends DurableObject {
           }
         }
 
+        try {
+          webSocket.send(
+            JSON.stringify({
+              type: "system",
+              message: foundActive
+                ? "تم طرد " + target + " فورًا"
+                : "تم حظر " + target + " بشكل دائم (مش متصل دلوقتي)",
+            })
+          );
+        } catch (e) {}
+
         this.broadcast(
           JSON.stringify({
             type: "system",
             message: target + " تم طرده" + (data.reason ? ": " + data.reason : ""),
           }),
-          null
+          webSocket
         );
         return;
       }
 
       if (data.type === "unban") {
         if (data.requester !== OWNER_USERNAME) return;
-        this.bannedUsers.delete(data.target);
+        this.bannedUsers.delete((data.target || "").toLowerCase());
         await this.saveBanned();
         return;
       }
