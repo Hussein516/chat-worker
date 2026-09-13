@@ -13,14 +13,14 @@ export class ChatRoom extends DurableObject {
   }
 
   async loadState() {
-    const stored = await this.state.storage.get("banned");
+    const stored = await this.ctx.storage.get("banned");
     if (Array.isArray(stored)) {
       this.bannedUsers = new Set(stored);
     }
   }
 
   async saveBanned() {
-    await this.state.storage.put("banned", Array.from(this.bannedUsers));
+    await this.ctx.storage.put("banned", Array.from(this.bannedUsers));
   }
 
   containsLink(text) {
