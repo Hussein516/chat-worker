@@ -1,13 +1,34 @@
 import { DurableObject } from "cloudflare:workers";
 
+const OWNER_USERNAME = "maalek_1234";
+
 export class ChatRoom extends DurableObject {
   constructor(state, env) {
     super(state, env);
     this.sessions = [];
     this.messages = [];
+    this.socketUsernames = new Map();
+    this.bannedUsers = new Set();
+    this.ready = this.loadState();
+  }
+
+  async loadState() {
+    const stored = await this.state.storage.get("banned");
+    if (Array.isArray(stored)) {
+      this.bannedUsers = new Set(stored);
+    }
+  }
+
+  async saveBanned() {
+    await this.state.storage.put("banned", Array.from(this.bannedUsers));
+  }
+
+  containsLink(text) {
+    return /https?:\/\/|www\.|discord\.gg|\.com\b|\.net\b|\.io\b|\.gg\b|\.xyz\b|\.bet\b|\.casino\b/i.test(text || "");
   }
 
   async fetch(request) {
+    await this.ready;
     if (request.headers.get("Upgrade") === "websocket") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -36,10 +57,58 @@ export class ChatRoom extends DurableObject {
     this.sessions.push(webSocket);
 
     webSocket.addEventListener("message", async (event) => {
+      await this.ready;
+
       let data;
       try {
         data = JSON.parse(event.data);
       } catch (e) {
+        return;
+      }
+
+      if (data.username) {
+        this.socketUsernames.set(webSocket, data.username);
+
+        if (this.bannedUsers.has(data.username)) {
+          try {
+            webSocket.send(JSON.stringify({ error: "banned" }));
+          } catch (e) {}
+          webSocket.close();
+          return;
+        }
+      }
+
+      if (data.type === "kick") {
+        if (data.requester !== OWNER_USERNAME) return;
+        const target = data.target;
+        if (!target) return;
+
+        this.bannedUsers.add(target);
+        await this.saveBanned();
+
+        for (const [ws, uname] of this.socketUsernames.entries()) {
+          if (uname === target) {
+            try {
+              ws.send(JSON.stringify({ error: "kicked", reason: data.reason || "" }));
+              ws.close();
+            } catch (e) {}
+          }
+        }
+
+        this.broadcast(
+          JSON.stringify({
+            type: "system",
+            message: target + " تم طرده" + (data.reason ? ": " + data.reason : ""),
+          }),
+          null
+        );
+        return;
+      }
+
+      if (data.type === "unban") {
+        if (data.requester !== OWNER_USERNAME) return;
+        this.bannedUsers.delete(data.target);
+        await this.saveBanned();
         return;
       }
 
@@ -63,6 +132,13 @@ export class ChatRoom extends DurableObject {
         return;
       }
 
+      if (this.containsLink(data.message)) {
+        try {
+          webSocket.send(JSON.stringify({ error: "links_not_allowed" }));
+        } catch (e) {}
+        return;
+      }
+
       const { success } = await this.env.RATE_LIMITER.limit({ key: ip });
       if (!success) {
         try {
@@ -81,12 +157,12 @@ export class ChatRoom extends DurableObject {
       this.messages.push(msg);
       if (this.messages.length > 20) this.messages.shift();
 
-      const payload = JSON.stringify(msg);
-      this.broadcast(payload, null);
+      this.broadcast(JSON.stringify(msg), null);
     });
 
     webSocket.addEventListener("close", () => {
       this.sessions = this.sessions.filter((ws) => ws !== webSocket);
+      this.socketUsernames.delete(webSocket);
     });
   }
 }
