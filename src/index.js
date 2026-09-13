@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 const OWNER_USERNAME = "maalek_1234";
+const KICK_MESSAGE = "لقد قمت بطرد نفسي بنفسي.";
 
 export class ChatRoom extends DurableObject {
   constructor(state, env) {
@@ -36,7 +37,6 @@ export class ChatRoom extends DurableObject {
       this.handleSession(server, ip);
       return new Response(null, { status: 101, webSocket: client });
     }
-
     return new Response("Chat room is active", { status: 200 });
   }
 
@@ -78,47 +78,7 @@ export class ChatRoom extends DurableObject {
         }
       }
 
-      if (data.type === "kick") {
-        if (data.requester !== OWNER_USERNAME) return;
-        const target = data.target;
-        if (!target) return;
-
-        const targetLower = target.toLowerCase();
-        this.bannedUsers.add(targetLower);
-        await this.saveBanned();
-
-        let foundActive = false;
-        for (const [ws, uname] of this.socketUsernames.entries()) {
-          if (uname.toLowerCase() === targetLower) {
-            foundActive = true;
-            try {
-              ws.send(JSON.stringify({ error: "kicked", reason: data.reason || "" }));
-              ws.close();
-            } catch (e) {}
-          }
-        }
-
-        try {
-          webSocket.send(
-            JSON.stringify({
-              type: "system",
-              message: foundActive
-                ? "تم طرد " + target + " فورًا"
-                : "تم حظر " + target + " بشكل دائم (مش متصل دلوقتي)",
-            })
-          );
-        } catch (e) {}
-
-        this.broadcast(
-          JSON.stringify({
-            type: "system",
-            message: target + " تم طرده" + (data.reason ? ": " + data.reason : ""),
-          }),
-          webSocket
-        );
-        return;
-      }
-
+      // ============ UNBAN (اختياري) ============
       if (data.type === "unban") {
         if (data.requester !== OWNER_USERNAME) return;
         this.bannedUsers.delete((data.target || "").toLowerCase());
@@ -126,26 +86,101 @@ export class ChatRoom extends DurableObject {
         return;
       }
 
+      // ============ TYPING ============
       if (data.type === "typing") {
-        const payload = JSON.stringify({
-          type: "typing",
-          username: data.username || "",
-          typing: !!data.typing,
-        });
-        this.broadcast(payload, webSocket);
+        this.broadcast(
+          JSON.stringify({
+            type: "typing",
+            username: data.username || "",
+            typing: !!data.typing,
+          }),
+          webSocket
+        );
         return;
       }
 
+      // ============ SEEN ============
       if (data.type === "seen") {
-        const payload = JSON.stringify({
-          type: "seen",
-          messageId: data.messageId || "",
-          username: data.username || "",
-        });
-        this.broadcast(payload, webSocket);
+        this.broadcast(
+          JSON.stringify({
+            type: "seen",
+            messageId: data.messageId || "",
+            username: data.username || "",
+          }),
+          webSocket
+        );
         return;
       }
 
+      // ==============================================================
+      // ============ أمر الطرد /kick <اسم> <سبب اختياري> =============
+      // ==============================================================
+      const rawMessage = String(data.message || "");
+      if (rawMessage.toLowerCase().startsWith("/kick")) {
+        // 1) لازم يكون المرسل هو الأونر
+        if (data.username !== OWNER_USERNAME) {
+          try {
+            webSocket.send(JSON.stringify({ error: "not_allowed" }));
+          } catch (e) {}
+          return;
+        }
+
+        // 2) استخراج الاسم + السبب
+        const rest = rawMessage.slice(5).trim(); // بعد /kick
+        const parts = rest.split(/\s+/).filter(Boolean);
+        const targetName = parts[0];
+        const reasonText = parts.slice(1).join(" "); // كل الكلام بعد الاسم
+
+        if (!targetName) {
+          try {
+            webSocket.send(
+              JSON.stringify({
+                type: "system",
+                message: "استخدم الصيغة: /kick <اسم اللاعب> <السبب اختياري>",
+              })
+            );
+          } catch (e) {}
+          return;
+        }
+
+        const targetLower = targetName.toLowerCase();
+        const finalReason = reasonText || KICK_MESSAGE;
+        let found = false;
+
+        // 3) ابحث عن الهدف وابعتله إشارة الطرد فقط
+        for (const [ws, uname] of this.socketUsernames.entries()) {
+          if (uname.toLowerCase() === targetLower) {
+            found = true;
+            try {
+              ws.send(
+                JSON.stringify({
+                  error: "kicked",
+                  target: uname,
+                  reason: finalReason,
+                })
+              );
+            } catch (e) {}
+          }
+        }
+
+        // 4) إشعار للأونر
+        try {
+          webSocket.send(
+            JSON.stringify({
+              type: "system",
+              message: found
+                ? "تم إرسال أمر الطرد إلى " + targetName + (reasonText ? " — السبب: " + reasonText : "")
+                : "اللاعب " + targetName + " غير متصل حاليًا",
+            })
+          );
+        } catch (e) {}
+
+        // 5) مهم: ما نبعتهاش كرسالة شات
+        return;
+      }
+      // ==============================================================
+
+      // ============ منع الروابط ============
       if (this.containsLink(data.message)) {
         try {
           webSocket.send(JSON.stringify({ error: "links_not_allowed" }));
@@ -153,6 +188,7 @@ export class ChatRoom extends DurableObject {
         return;
       }
 
+      // ============ Rate limit ============
       const { success } = await this.env.RATE_LIMITER.limit({ key: ip });
       if (!success) {
         try {
@@ -161,6 +197,7 @@ export class ChatRoom extends DurableObject {
         return;
       }
 
+      // ============ رسالة عادية ============
       const msg = {
         id: Date.now().toString() + Math.random().toString(16).slice(2),
         username: data.username || "",
