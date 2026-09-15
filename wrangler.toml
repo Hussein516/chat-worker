@@ -1,6 +1,7 @@
 name = "proud-sound-77a5"
 main = "src/index.js"
-compatibility_date = "2026-09-09"
+compatibility_date = "2024-09-23"
+workers_dev = true
 
 [[durable_objects.bindings]]
 name = "CHAT_ROOM"
@@ -10,11 +11,7 @@ class_name = "ChatRoom"
 tag = "v1"
 new_sqlite_classes = ["ChatRoom"]
 
-# ====== Rate Limiter: 20 رسالة كل 10 ثواني (رسالتين في الثانية) ======
-[[ratelimits]]
-name = "RATE_LIMITER"
-namespace_id = "1001"
-
-[ratelimits.simple]
-limit = 20
-period = 10
+# ===== متغيرات البيئة =====
+[vars]
+OWNER_USERNAME = "maalek_1234"
+OWNER_TOKEN = "T1!7#Lm9$Vx2@Plz8%RL4&/n6*Bw3^Cd5"
