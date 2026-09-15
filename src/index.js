@@ -157,6 +157,26 @@ export class ChatRoom extends DurableObject {
   async fetch(request) {
     await this.ready;
 
+    const path = new URL(request.url).pathname;
+
+    // ✅ نقطة نهاية جديدة: تصفير قائمة المحظورين
+    if (path === "/clear-banned") {
+      const count = this.bannedUsers.size;
+      this.bannedUsers.clear();
+      await this.saveBanned();
+      return new Response(
+        JSON.stringify({
+          success: true,
+          cleared: count,
+          message: "تم مسح " + count + " محظور",
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        }
+      );
+    }
+
     if (request.headers.get("Upgrade") === "websocket") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
