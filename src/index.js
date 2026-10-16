@@ -177,7 +177,6 @@ export class ChatRoom extends DurableObject {
 
   async fetch(request) {
     await this.ready;
-
     const path = new URL(request.url).pathname;
 
     if (path === "/clear-banned") {
@@ -238,6 +237,7 @@ export class ChatRoom extends DurableObject {
       announced: false,
       lastSeen: Date.now(),
     };
+
     this.sessions.set(webSocket, session);
     this.startPing();
 
@@ -247,7 +247,6 @@ export class ChatRoom extends DurableObject {
 
     webSocket.addEventListener("message", async (event) => {
       await this.ready;
-
       session.lastSeen = Date.now();
 
       let data;
@@ -353,7 +352,6 @@ export class ChatRoom extends DurableObject {
       }
 
       if (data.type === "pong") return;
-
       if (data.type === "hello") return;
 
       if (data.type === "whisper") {
@@ -363,28 +361,39 @@ export class ChatRoom extends DurableObject {
           } catch (e) {}
           return;
         }
+
         const body = String(data.message || "").slice(0, MAX_MESSAGE_LEN);
         const targetLower = String(data.target || "").toLowerCase().trim();
         if (!body || !targetLower) return;
-        if (targetLower === session.username.toLowerCase()) return;
+
+        // ⬇️ التعديل: المالك فقط يمكنه الهمس لنفسه
+        if (
+          targetLower === session.username.toLowerCase() &&
+          !session.isOwner
+        )
+          return;
+
         if (this.containsLink(body)) {
           try {
             webSocket.send(JSON.stringify({ error: "links_not_allowed" }));
           } catch (e) {}
           return;
         }
+
         if (!this.checkRateLimit(session)) {
           try {
             webSocket.send(JSON.stringify({ error: "rate_limited" }));
           } catch (e) {}
           return;
         }
+
         const targets = [];
         for (const [ws, s] of this.sessions.entries()) {
           if (s.username && s.username.toLowerCase() === targetLower) {
             targets.push({ ws, name: s.username });
           }
         }
+
         if (targets.length === 0) {
           try {
             webSocket.send(
@@ -396,6 +405,7 @@ export class ChatRoom extends DurableObject {
           } catch (e) {}
           return;
         }
+
         const payload = JSON.stringify({
           type: "whisper",
           id: Date.now().toString(36) + Math.random().toString(36).slice(2, 10),
@@ -404,6 +414,7 @@ export class ChatRoom extends DurableObject {
           message: body,
           created_at: Date.now(),
         });
+
         for (const t of targets) {
           try {
             t.ws.send(payload);
@@ -669,6 +680,7 @@ export class ChatRoom extends DurableObject {
         message: rawMessage,
         created_at: Date.now(),
       };
+
       this.messages.push(msg);
       if (this.messages.length > HISTORY_LIMIT) this.messages.shift();
 
