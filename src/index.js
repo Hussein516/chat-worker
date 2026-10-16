@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 
-const KICK_MESSAGE = "لقد قمت بطرد نفسي بنفسي.";
+const KICK_MESSAGE = "تم طردك بسبب مخالفة قوانين الشات";
 const HISTORY_LIMIT = 30;
 const RATE_LIMIT_PER_USER = 15;
 const RATE_LIMIT_WINDOW_MS = 10000;
@@ -121,6 +121,17 @@ export class ChatRoom extends DurableObject {
         this.pingTimer = null;
         return;
       }
+
+      // (تعديل 5) كشف الاتصالات الميتة قبل إرسال ping
+      const now = Date.now();
+      for (const [ws, s] of this.sessions) {
+        if (now - s.lastSeen > 70000) {
+          try {
+            ws.close();
+          } catch (e) {}
+        }
+      }
+
       this.broadcast(JSON.stringify({ type: "ping", t: Date.now() }), null);
     }, PING_INTERVAL_MS);
   }
@@ -156,10 +167,9 @@ export class ChatRoom extends DurableObject {
 
   async fetch(request) {
     await this.ready;
-
     const path = new URL(request.url).pathname;
 
-    // ✅ نقطة نهاية جديدة: تصفير قائمة المحظورين
+    // ✅ نقطة نهاية: تصفير قائمة المحظورين
     if (path === "/clear-banned") {
       const count = this.bannedUsers.size;
       this.bannedUsers.clear();
@@ -206,6 +216,7 @@ export class ChatRoom extends DurableObject {
   handleSession(webSocket, ip) {
     webSocket.accept();
 
+    // (تعديل 2) حقول جديدة: authDeadline, announced, lastSeen
     const session = {
       username: null,
       displayName: null,
@@ -215,16 +226,22 @@ export class ChatRoom extends DurableObject {
       rateCount: 0,
       rateReset: Date.now(),
       authDeadline: Date.now() + AUTH_TIMEOUT_MS,
+      announced: false,
+      lastSeen: Date.now(),
     };
     this.sessions.set(webSocket, session);
     this.startPing();
 
     try {
-      webSocket.send(JSON.stringify({ type: "history", messages: this.messages }));
+      webSocket.send(
+        JSON.stringify({ type: "history", messages: this.messages })
+      );
     } catch (e) {}
 
     webSocket.addEventListener("message", async (event) => {
       await this.ready;
+      // (تعديل 2) تحديث lastSeen في أول كل رسالة
+      session.lastSeen = Date.now();
 
       let data;
       try {
@@ -285,6 +302,22 @@ export class ChatRoom extends DurableObject {
         }
 
         session.username = uname;
+
+        // (تعديل 3) إشعار الدخول + إرسال قائمة المتصلين للمنضم الجديد
+        if (!session.announced) {
+          session.announced = true;
+          const users = [];
+          for (const [, s] of this.sessions.entries()) {
+            if (s.username) users.push(s.username);
+          }
+          try {
+            webSocket.send(JSON.stringify({ type: "presence", users }));
+          } catch (e) {}
+          this.broadcast(
+            JSON.stringify({ type: "join", username: uname }),
+            webSocket
+          );
+        }
       }
 
       if (data.type === "typing") {
@@ -314,7 +347,6 @@ export class ChatRoom extends DurableObject {
       }
 
       if (data.type === "pong") return;
-
       if (data.type === "hello") return;
 
       if (data.type === "unban") {
@@ -330,10 +362,7 @@ export class ChatRoom extends DurableObject {
         await this.saveBanned();
         try {
           webSocket.send(
-            JSON.stringify({
-              type: "system",
-              message: "تم فك الحظر عن " + target,
-            })
+            JSON.stringify({ type: "system", message: "تم فك الحظر عن " + target })
           );
         } catch (e) {}
         return;
@@ -577,13 +606,20 @@ export class ChatRoom extends DurableObject {
       this.broadcast(JSON.stringify({ type: "message", ...msg }), null);
     });
 
-    webSocket.addEventListener("close", () => {
+    // (تعديل 4) معالج موحد للإغلاق والخطأ + إشعار leave
+    const leave = () => {
+      const s = this.sessions.get(webSocket);
+      if (!s) return;
       this.sessions.delete(webSocket);
-    });
-
-    webSocket.addEventListener("error", () => {
-      this.sessions.delete(webSocket);
-    });
+      if (s.announced && s.username) {
+        this.broadcast(
+          JSON.stringify({ type: "leave", username: s.username }),
+          null
+        );
+      }
+    };
+    webSocket.addEventListener("close", leave);
+    webSocket.addEventListener("error", leave);
   }
 }
 
