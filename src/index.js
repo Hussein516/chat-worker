@@ -5,6 +5,7 @@ const HISTORY_LIMIT = 30;
 const RATE_LIMIT_PER_USER = 15;
 const RATE_LIMIT_WINDOW_MS = 10000;
 const PING_INTERVAL_MS = 25000;
+const STALE_MS = 70000;
 const MAX_USERNAME_LEN = 32;
 const MAX_MESSAGE_LEN = 300;
 const AUTH_TIMEOUT_MS = 3000;
@@ -16,7 +17,6 @@ const SCRIPT_SOURCES = [
 ];
 
 const EMBEDDED_SCRIPT_FALLBACK =
-  "-- [Chat] تعذر تحميل السكربت من كل المصادر\n" +
   "warn('[Chat] فشل تحميل السكربت من Worker')\n";
 
 async function serveScript() {
@@ -39,9 +39,7 @@ async function serveScript() {
           });
         }
       }
-    } catch (e) {
-      // جرب المصدر التالي
-    }
+    } catch (e) {}
   }
   return new Response(EMBEDDED_SCRIPT_FALLBACK, {
     status: 200,
@@ -95,6 +93,18 @@ export class ChatRoom extends DurableObject {
     return (this.env && this.env.OWNER_TOKEN) || "";
   }
 
+  removeSession(ws) {
+    const s = this.sessions.get(ws);
+    if (!s) return;
+    this.sessions.delete(ws);
+    if (s.announced && s.username) {
+      this.broadcast(
+        JSON.stringify({ type: "leave", username: s.username }),
+        null
+      );
+    }
+  }
+
   broadcast(payload, excludeWs) {
     const dead = [];
     for (const [ws] of this.sessions) {
@@ -106,10 +116,10 @@ export class ChatRoom extends DurableObject {
       }
     }
     for (const ws of dead) {
-      this.sessions.delete(ws);
       try {
         ws.close();
       } catch (e) {}
+      this.removeSession(ws);
     }
   }
 
@@ -121,17 +131,17 @@ export class ChatRoom extends DurableObject {
         this.pingTimer = null;
         return;
       }
-
-      // (تعديل 5) كشف الاتصالات الميتة قبل إرسال ping
       const now = Date.now();
+      const stale = [];
       for (const [ws, s] of this.sessions) {
-        if (now - s.lastSeen > 70000) {
-          try {
-            ws.close();
-          } catch (e) {}
-        }
+        if (now - s.lastSeen > STALE_MS) stale.push(ws);
       }
-
+      for (const ws of stale) {
+        try {
+          ws.close();
+        } catch (e) {}
+        this.removeSession(ws);
+      }
       this.broadcast(JSON.stringify({ type: "ping", t: Date.now() }), null);
     }, PING_INTERVAL_MS);
   }
@@ -167,9 +177,9 @@ export class ChatRoom extends DurableObject {
 
   async fetch(request) {
     await this.ready;
+
     const path = new URL(request.url).pathname;
 
-    // ✅ نقطة نهاية: تصفير قائمة المحظورين
     if (path === "/clear-banned") {
       const count = this.bannedUsers.size;
       this.bannedUsers.clear();
@@ -216,7 +226,6 @@ export class ChatRoom extends DurableObject {
   handleSession(webSocket, ip) {
     webSocket.accept();
 
-    // (تعديل 2) حقول جديدة: authDeadline, announced, lastSeen
     const session = {
       username: null,
       displayName: null,
@@ -233,14 +242,12 @@ export class ChatRoom extends DurableObject {
     this.startPing();
 
     try {
-      webSocket.send(
-        JSON.stringify({ type: "history", messages: this.messages })
-      );
+      webSocket.send(JSON.stringify({ type: "history", messages: this.messages }));
     } catch (e) {}
 
     webSocket.addEventListener("message", async (event) => {
       await this.ready;
-      // (تعديل 2) تحديث lastSeen في أول كل رسالة
+
       session.lastSeen = Date.now();
 
       let data;
@@ -303,7 +310,6 @@ export class ChatRoom extends DurableObject {
 
         session.username = uname;
 
-        // (تعديل 3) إشعار الدخول + إرسال قائمة المتصلين للمنضم الجديد
         if (!session.announced) {
           session.announced = true;
           const users = [];
@@ -347,7 +353,67 @@ export class ChatRoom extends DurableObject {
       }
 
       if (data.type === "pong") return;
+
       if (data.type === "hello") return;
+
+      if (data.type === "whisper") {
+        if (!session.username) {
+          try {
+            webSocket.send(JSON.stringify({ error: "no_username" }));
+          } catch (e) {}
+          return;
+        }
+        const body = String(data.message || "").slice(0, MAX_MESSAGE_LEN);
+        const targetLower = String(data.target || "").toLowerCase().trim();
+        if (!body || !targetLower) return;
+        if (targetLower === session.username.toLowerCase()) return;
+        if (this.containsLink(body)) {
+          try {
+            webSocket.send(JSON.stringify({ error: "links_not_allowed" }));
+          } catch (e) {}
+          return;
+        }
+        if (!this.checkRateLimit(session)) {
+          try {
+            webSocket.send(JSON.stringify({ error: "rate_limited" }));
+          } catch (e) {}
+          return;
+        }
+        const targets = [];
+        for (const [ws, s] of this.sessions.entries()) {
+          if (s.username && s.username.toLowerCase() === targetLower) {
+            targets.push({ ws, name: s.username });
+          }
+        }
+        if (targets.length === 0) {
+          try {
+            webSocket.send(
+              JSON.stringify({
+                type: "system",
+                message: "اللاعب غير متصل حاليًا.",
+              })
+            );
+          } catch (e) {}
+          return;
+        }
+        const payload = JSON.stringify({
+          type: "whisper",
+          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 10),
+          from: session.username,
+          to: targets[0].name,
+          message: body,
+          created_at: Date.now(),
+        });
+        for (const t of targets) {
+          try {
+            t.ws.send(payload);
+          } catch (e) {}
+        }
+        try {
+          webSocket.send(payload);
+        } catch (e) {}
+        return;
+      }
 
       if (data.type === "unban") {
         if (!session.isOwner) {
@@ -362,7 +428,10 @@ export class ChatRoom extends DurableObject {
         await this.saveBanned();
         try {
           webSocket.send(
-            JSON.stringify({ type: "system", message: "تم فك الحظر عن " + target })
+            JSON.stringify({
+              type: "system",
+              message: "تم فك الحظر عن " + target,
+            })
           );
         } catch (e) {}
         return;
@@ -606,20 +675,13 @@ export class ChatRoom extends DurableObject {
       this.broadcast(JSON.stringify({ type: "message", ...msg }), null);
     });
 
-    // (تعديل 4) معالج موحد للإغلاق والخطأ + إشعار leave
-    const leave = () => {
-      const s = this.sessions.get(webSocket);
-      if (!s) return;
-      this.sessions.delete(webSocket);
-      if (s.announced && s.username) {
-        this.broadcast(
-          JSON.stringify({ type: "leave", username: s.username }),
-          null
-        );
-      }
-    };
-    webSocket.addEventListener("close", leave);
-    webSocket.addEventListener("error", leave);
+    webSocket.addEventListener("close", () => {
+      this.removeSession(webSocket);
+    });
+
+    webSocket.addEventListener("error", () => {
+      this.removeSession(webSocket);
+    });
   }
 }
 
