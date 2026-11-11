@@ -11,7 +11,6 @@ class_name = "ChatRoom"
 tag = "v1"
 new_sqlite_classes = ["ChatRoom"]
 
-# ===== متغيرات البيئة =====
 [vars]
 OWNER_USERNAME = "maalek_1234"
-OWNER_TOKEN = "T1!7#Lm9$Vx2@Plz8%RL4&/n6*Bw3^Cd5"
+OWNER_TOKEN = "ĵq7s51ìendþwĝs8111NH"
