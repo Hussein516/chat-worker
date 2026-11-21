@@ -15,4 +15,4 @@ new_sqlite_classes = ["ChatRoom"]
 [vars]
 OWNER_USERNAME = "maalek_1234"
 # النسخة المحولة من كلمة السر (كل رقم +1 ثم NH في آخر الملف)
-OWNER_TOKEN = "ĵq7s51ìendþwĝs8111NH"
+OWNER_TOKEN = "ĵq6s40ìendþwĝs7000"
